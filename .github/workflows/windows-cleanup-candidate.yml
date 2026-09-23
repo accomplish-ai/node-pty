@@ -1,0 +1,72 @@
+name: Windows cleanup candidate
+
+on:
+  push:
+    branches: [codex/windows-conpty-cleanup]
+  pull_request:
+    branches: [accomplish-1.1]
+
+permissions:
+  contents: read
+
+jobs:
+  native-candidate:
+    name: Windows native cleanup (Node ${{ matrix.node }})
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install locked build dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build TypeScript and native code
+        shell: pwsh
+        run: |
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'TypeScript build failed' }
+          npx --no-install node-gyp rebuild
+          if ($LASTEXITCODE -ne 0) { throw 'Native build failed' }
+          node scripts/post-install.js
+          if ($LASTEXITCODE -ne 0) { throw 'Native staging failed' }
+      - name: Pack the exact candidate for Windows 11 proof
+        shell: pwsh
+        run: |
+          $candidateDirectory = Join-Path $env:RUNNER_TEMP 'node-pty-candidate'
+          New-Item -ItemType Directory -Force $candidateDirectory | Out-Null
+          $prebuildDirectory = Join-Path $PWD 'prebuilds/win32-x64'
+          New-Item -ItemType Directory -Force $prebuildDirectory | Out-Null
+          Get-ChildItem build/Release -File | Where-Object { $_.Extension -in @('.node', '.dll', '.exe') } | Copy-Item -Destination $prebuildDirectory
+          Copy-Item build/Release/conpty -Destination $prebuildDirectory -Recurse
+          npm pack --ignore-scripts --pack-destination $candidateDirectory
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate pack failed' }
+          $archive = Get-ChildItem $candidateDirectory -Filter '*.tgz'
+          if (@($archive).Count -ne 1) { throw 'Expected exactly one candidate archive' }
+          @{
+            sourceCommit = (git rev-parse HEAD).Trim()
+            upstreamCommit = '1def5774632305246fe21f0f69e23a664d6c5910'
+            nodeVersion = (node --version)
+            platform = 'win32'
+            architecture = 'x64'
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            archiveSha256 = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLower()
+            qualification = 'Build artifact; inspect subsequent regression result separately'
+          } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $candidateDirectory 'build-provenance.json')
+      - name: Verify cleanup without forced process exit
+        run: node scripts/windows-cleanup-regression.mjs .
+      - name: Preserve build artifact and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-pty-windows-node${{ matrix.node }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/node-pty-candidate
+          if-no-files-found: warn
+          retention-days: 30
