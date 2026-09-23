@@ -1,0 +1,70 @@
+# Accomplish Windows terminal cleanup candidate
+
+This fork qualifies the Sandbox Engine's Windows x64 terminal cleanup fix. Its
+baseline is node-pty 1.1.0, upstream commit
+`1def5774632305246fe21f0f69e23a664d6c5910`. The source package retains the upstream
+name/version so the original build and tests continue to work.
+
+## Private test packages
+
+The existing **CI** workflow accepts a manual dispatch on
+`codex/windows-conpty-cleanup`. Set `publish_test_package` to `true` and supply a
+successful **Windows cleanup candidate** `native_run_id` for that exact commit.
+Publication remains disabled by default and cannot run on pull requests.
+The Linux, macOS and Windows source test jobs must all pass. The final assembled
+archive is then installed on Windows and macOS with Node 20 and Node 22. The
+upstream tests run against its installed implementation and Windows also runs
+the natural-exit cleanup harness. All four installed-package jobs must pass
+before publication starts.
+
+The assembler checks the native run's repository, source commit, workflow,
+successful Node 20 and Node 22 jobs, artifact provenance and archive checksums.
+It uses the Node 22 build's Windows x64 prebuilds and preserves the original
+node-pty 1.1.0 macOS arm64/x64 prebuild bytes. The original registry archive
+records `spawn-helper` as mode 0644; assembly corrects both helpers to executable
+mode 0755. Other modes are retained. The
+upstream npm archive is pinned by SHA-512, and unchanged Unix native sources
+are required. No `build/` payload can shadow the selected prebuilds.
+
+Packages are published privately to GitHub Packages as
+`@accomplish-ai/node-pty@1.1.1-test.<publication-run>.<attempt>.<source-sha8>`.
+Each publication has a unique `test-<run>-<attempt>` tag. The workflow creates
+no Git tags or stable releases and does not update `latest`.
+Every file's checksum and mode, both native build receipts and the source
+commit are embedded in `accomplish-build-provenance.json`. The workflow then
+downloads the exact registry version and verifies it matches the assembled
+archive. Keep the publication receipt with integration evidence.
+
+Engine can keep its existing imports using an exact npm alias:
+
+```json
+"node-pty": "npm:@accomplish-ai/node-pty@1.1.1-test.<run>.<attempt>.<sha8>"
+```
+
+Use the actual immutable version returned by a successful publication. Do not
+install a moving test tag. Consumers need GitHub Packages read access; CI
+publication uses its own scoped `GITHUB_TOKEN`, not a developer's credentials.
+The new package's Actions access must explicitly allow the Sandbox Engine and
+Agent Runtime repositories to read it. Existing access to other Accomplish
+packages does not grant access to this package. After initial publication,
+verify an exact-version install using each consumer repository's CI token
+before considering cross-repository adoption ready. A developer-token download
+or the publisher's registry check does not prove those consumer permissions.
+
+## Supported candidate payloads
+
+The package includes prebuilds for Windows x64 and macOS arm64/x64. It excludes
+upstream Windows arm64 binaries because they do not implement the new native
+cleanup contract. Other targets retain the upstream source-build fallback;
+Windows arm64 is not qualified by this candidate. Linux retains source builds
+and the existing Linux CI lane.
+
+This publication step is test-only. A successful package build does not replace
+Sandbox integration tests, natural terminal-owner exit and handle-count checks,
+or the final clean Windows 11 host acceptance.
+
+## Local package tests
+
+Run `python scripts/accomplish-package-test.py` with Python 3.12 or later. The
+tests create real tar archives and check executable modes, platform selection,
+native-source matching, immutable version rules, tampering and unsafe archives.
