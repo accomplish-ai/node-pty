@@ -67,6 +67,17 @@ jobs:
         env:
           NODE_PTY_TRACE_CLEANUP: '1'
         run: node --expose-gc scripts/windows-cleanup-regression.mjs child "$PWD/lib/index.js" natural
+      - name: Diagnose shutdown crash when SDK debugger is available
+        if: ${{ !cancelled() }}
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $debugger = "${env:ProgramFiles(x86)}/Windows Kits/10/Debuggers/x64/cdb.exe"
+          if (!(Test-Path -LiteralPath $debugger)) {
+            Write-Output 'SDK debugger is not installed; no crash-stack evidence collected'
+            exit 0
+          }
+          & $debugger -c 'g; .exr -1; .ecxr; kb; q' (Get-Command node).Source --expose-gc scripts/windows-cleanup-regression.mjs child "$PWD/lib/index.js" shutdown
       - name: Preserve build artifact and provenance
         if: always()
         uses: actions/upload-artifact@v4

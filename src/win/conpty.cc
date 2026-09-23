@@ -46,11 +46,13 @@ static bool trace_cleanup_enabled() {
   return GetEnvironmentVariableW(L"NODE_PTY_TRACE_CLEANUP", value, 2) == 1 && value[0] == L'1';
 }
 
-static void trace_cleanup(const char* phase, int id) {
+static void trace_cleanup(const char* phase, int id, HANDLE shell = nullptr) {
   if (trace_cleanup_enabled()) {
     DWORD count = 0;
     GetProcessHandleCount(GetCurrentProcess(), &count);
-    std::cerr << "cleanup-native " << phase << " id=" << id << " handles=" << count << std::endl;
+    std::cerr << "cleanup-native " << phase << " id=" << id << " handles=" << count;
+    if (shell) std::cerr << " shellHandle=" << reinterpret_cast<uintptr_t>(shell) << " shellPid=" << GetProcessId(shell);
+    std::cerr << std::endl;
   }
 }
 
@@ -67,7 +69,7 @@ struct pty_baton {
   pty_baton(int _id, HANDLE _hIn, HANDLE _hOut, HPCON _hpc, PFNCLOSEPSEUDOCONSOLE close) :
     id(_id), hIn(_hIn), hOut(_hOut), hpc(_hpc), closePseudoConsole(close) {};
   ~pty_baton() {
-    trace_cleanup("before-shell-close", id);
+    trace_cleanup("before-shell-close", id, hShell);
     if (hShell) CloseHandle(hShell);
     trace_cleanup("after-shell-close", id);
   }
@@ -668,7 +670,16 @@ static Napi::Value TraceHandles(const Napi::CallbackInfo& info) {
     item.Set("handle", Napi::Number::New(info.Env(), reinterpret_cast<uintptr_t>(handle)));
     item.Set("type", Napi::String::New(info.Env(), path_util::wstring_to_string(name)));
     item.Set("access", Napi::Number::New(info.Env(), snapshot->entries[i].access));
-    if (name == L"Process") item.Set("pid", Napi::Number::New(info.Env(), GetProcessId(handle)));
+    if (name == L"Process") {
+      item.Set("pid", Napi::Number::New(info.Env(), GetProcessId(handle)));
+      DWORD exitCode = 0;
+      if (GetExitCodeProcess(handle, &exitCode)) item.Set("exitCode", Napi::Number::New(info.Env(), exitCode));
+      wchar_t imagePath[32768];
+      DWORD length = 32768;
+      if (QueryFullProcessImageNameW(handle, 0, imagePath, &length)) {
+        item.Set("image", Napi::String::New(info.Env(), path_util::wstring_to_string(std::wstring(imagePath, length))));
+      }
+    }
     if (name == L"Thread") item.Set("tid", Napi::Number::New(info.Env(), GetThreadId(handle)));
     result.Set(static_cast<uint32_t>(i), item);
   }

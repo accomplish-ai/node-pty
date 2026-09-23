@@ -38,13 +38,19 @@ if (command === 'child') {
       await worker.terminate();
       return;
     }
-    const natural = mode === 'natural';
+    const natural = mode === 'natural' || mode === 'concurrent';
     const payload = mode === 'bulk' || mode === 'descendant';
     const terminal = pty.spawn(payload ? process.execPath : process.env.ComSpec, payload
       ? [fileURLToPath(new URL('./windows-cleanup-payload.cjs', import.meta.url)), mode]
       : natural ? ['/d', '/c', 'echo CLEANUP_FINAL_OUTPUT & exit /b 7'] : ['/d', '/q'], { cols: 120, rows: 24 });
     let output = '';
-    const data = terminal.onData(value => output += value);
+    const data = terminal.onData(value => {
+      output += value;
+      if (mode === 'concurrent') {
+        try { terminal.resize(121, 25); }
+        catch (error) { assert.match(error.message, /Cannot resize a pty that has already exited/); }
+      }
+    });
     let exit;
     const exited = new Promise(resolve => exit = terminal.onExit(resolve));
     let descendant;
@@ -82,7 +88,8 @@ if (command === 'child') {
     exit.dispose();
   }
   for (let round = 0; round < 5; round++) {
-    await exercise();
+    if (mode === 'concurrent') await Promise.all(Array.from({ length: 8 }, () => exercise()));
+    else await exercise();
     await delay(2500);
     for (let n = 0; n < 3; n++) { global.gc(); await delay(50); }
     const count = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -101,7 +108,7 @@ if (command === 'child') {
   assert.equal(process.platform, 'win32');
   const entry = resolve(command || '.', 'lib/index.js');
   let failed = false;
-  for (const scenario of (process.argv.slice(3).length ? process.argv.slice(3) : ['natural', 'kill', 'bulk', 'descendant', 'shutdown'])) {
+  for (const scenario of (process.argv.slice(3).length ? process.argv.slice(3) : ['natural', 'kill', 'bulk', 'descendant', 'concurrent', 'shutdown'])) {
     const child = spawn(process.execPath, ['--expose-gc', fileURLToPath(import.meta.url), 'child', entry, scenario],
       { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', timedOut = false;
