@@ -107,24 +107,31 @@ struct ExitEvent {
   std::mutex mutex;
   std::condition_variable notified;
   bool delivered = false;
+  void acknowledge() {
+    std::lock_guard<std::mutex> lock(mutex);
+    delivered = true;
+    notified.notify_one();
+  }
 };
 
 struct ExitDelivered {
   ExitEvent* event;
   ~ExitDelivered() {
-    std::lock_guard<std::mutex> lock(event->mutex);
-    event->delivered = true;
-    event->notified.notify_one();
+    event->acknowledge();
   }
 };
 
-static void DeliverExit(Napi::Env env, Napi::Function cb, void*, ExitEvent* event) {
+using ExitNotification = std::shared_ptr<ExitEvent>;
+
+static void DeliverExit(Napi::Env env, Napi::Function cb, void*, ExitNotification* data) {
+  std::unique_ptr<ExitNotification> notification(data);
+  auto event = notification->get();
   ExitDelivered delivered{event};
   // The typed callback also runs with an empty env during Worker teardown.
   // Always release the native waiter, even when calling JS is no longer legal.
   if (env && cb) {
-    napi_value code;
-    napi_value receiver;
+    napi_value code = nullptr;
+    napi_value receiver = nullptr;
     napi_status status = napi_create_int32(env, event->exit_code, &code);
     if (status == napi_ok) status = napi_get_undefined(env, &receiver);
     if (status == napi_ok) status = napi_call_function(env, receiver, cb, 1, &code, nullptr);
@@ -139,25 +146,31 @@ static void DeliverExit(Napi::Env env, Napi::Function cb, void*, ExitEvent* even
 
 void SetupExitCallback(Napi::Env env, Napi::Function cb, std::shared_ptr<pty_baton> baton) {
   std::thread *th = new std::thread;
+  auto exit_event = std::make_shared<ExitEvent>();
   // Don't use Napi::AsyncWorker which is limited by UV_THREADPOOL_SIZE.
-  auto tsfn = Napi::TypedThreadSafeFunction<void, ExitEvent, DeliverExit>::New(
+  auto tsfn = Napi::TypedThreadSafeFunction<void, ExitNotification, DeliverExit>::New(
       env,
       cb,                           // JavaScript function called asynchronously
       "SetupExitCallback_resource", // Name
       0,                            // Unlimited queue
       1,                            // Only one thread will use this initially
       nullptr,
-      [th](Napi::Env, void*, void*) {   // Finalizer used to clean threads up
+      [th, exit_event](Napi::Env, void*, void*) {
+        // During env teardown Node finalizes before disposing queued callbacks.
+        // Release the waiter first. The queued notification owns another shared
+        // reference, so its later null-env callback cannot touch freed state.
+        exit_event->acknowledge();
         th->join();
         delete th;
       });
-  *th = std::thread([tsfn = std::move(tsfn), baton] {
-    auto exit_event = std::make_unique<ExitEvent>();
+  *th = std::thread([tsfn = std::move(tsfn), baton, exit_event] {
     WaitForSingleObject(baton->hShell, INFINITE);
     GetExitCodeProcess(baton->hShell, (LPDWORD)(&exit_event->exit_code));
 
     // Publish the exit code before closing conout can emit a JS socket close.
-    auto status = tsfn.BlockingCall(exit_event.get());
+    auto notification = new ExitNotification(exit_event);
+    auto status = tsfn.BlockingCall(notification);
+    if (status != napi_ok) delete notification;
     if (status == napi_ok) {
       std::unique_lock<std::mutex> lock(exit_event->mutex);
       exit_event->notified.wait(lock, [&] { return exit_event->delivered; });

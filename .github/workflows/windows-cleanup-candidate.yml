@@ -10,6 +10,39 @@ permissions:
   contents: read
 
 jobs:
+  diagnostic-existing-binary:
+    name: Attribute handles using the previous diagnostic binary
+    runs-on: windows-2022
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 35878431109
+          name: node-pty-windows-node22-0ccaf30700fc1548d9ec9d57e728ab10f07efcb3-1
+          path: previous-diagnostic
+      - name: Verify and inspect the previous diagnostic build
+        shell: pwsh
+        env:
+          NODE_PTY_TRACE_CLEANUP: '1'
+        run: |
+          $receipt = Get-Content previous-diagnostic/build-provenance.json -Raw | ConvertFrom-Json
+          if ($receipt.sourceCommit -ne '0ccaf30700fc1548d9ec9d57e728ab10f07efcb3') { throw 'Unexpected diagnostic source' }
+          if ((Get-FileHash previous-diagnostic/node-pty-1.1.0.tgz -Algorithm SHA256).Hash.ToLower() -ne $receipt.archiveSha256) { throw 'Diagnostic archive mismatch' }
+          tar -xf previous-diagnostic/node-pty-1.1.0.tgz -C previous-diagnostic
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic extraction failed' }
+          New-Item -ItemType Directory previous-diagnostic/package/build | Out-Null
+          Copy-Item previous-diagnostic/package/prebuilds/win32-x64 previous-diagnostic/package/build/Release -Recurse
+          node --expose-gc scripts/windows-cleanup-regression.mjs child "$PWD/previous-diagnostic/package/lib/index.js" natural
   native-candidate:
     name: Windows native cleanup (Node ${{ matrix.node }})
     runs-on: windows-2022
@@ -28,6 +61,7 @@ jobs:
       - name: Install locked build dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build TypeScript and native code
+        id: build
         shell: pwsh
         run: |
           npm run build
@@ -63,12 +97,12 @@ jobs:
       - name: Verify cleanup without forced process exit
         run: node scripts/windows-cleanup-regression.mjs .
       - name: Diagnose native handle ownership
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NODE_PTY_TRACE_CLEANUP: '1'
         run: node --expose-gc scripts/windows-cleanup-regression.mjs child "$PWD/lib/index.js" natural
       - name: Diagnose shutdown crash when SDK debugger is available
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 2
         shell: pwsh
         run: |
