@@ -68,11 +68,6 @@ jobs:
         env:
           NODE_PTY_USE_CONPTY_DLL: '1'
         run: node scripts/windows-cleanup-regression.mjs .
-      - name: Diagnose termination after interactive shell readiness
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          NODE_PTY_USE_CONPTY_DLL: '1'
-        run: node scripts/windows-cleanup-regression.mjs . kill-ready
       - name: Preserve build artifact and provenance
         if: always()
         uses: actions/upload-artifact@v4

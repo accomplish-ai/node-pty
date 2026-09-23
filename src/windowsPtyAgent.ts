@@ -146,6 +146,13 @@ export class WindowsPtyAgent {
         return;
       }
       this._killRequested = true;
+      if (this._useConptyDll) {
+        // Bundled ConPTY closes its attached processes with the pseudoconsole.
+        // Its shell may not accept AttachConsole until startup input arrives.
+        this._inSocket.destroy();
+        (this._ptyNative as IConptyNative).kill(this._pty, this._useConptyDll);
+        return;
+      }
       // Attach while the console still exists. Closing it first races the helper
       // and can leave descendants running with a five-second fallback timer.
       this._getConsoleProcessList().then(consoleProcessList => {

@@ -19,11 +19,7 @@ static Napi::Value ApiConsoleProcessList(const Napi::CallbackInfo& info) {
     throw Napi::Error::New(env, "FreeConsole failed");
   }
   if (!AttachConsole(pid)) {
-    const DWORD code = GetLastError();
-    auto error = Napi::Error::New(env, "AttachConsole failed, Windows error " + std::to_string(code));
-    error.Set("win32Error", Napi::Number::New(env, code));
-    error.Set("shellPid", Napi::Number::New(env, pid));
-    throw error;
+    throw Napi::Error::New(env, "AttachConsole failed");
   }
   auto processList = std::vector<DWORD>(64);
   auto processCount = GetConsoleProcessList(&processList[0], static_cast<DWORD>(processList.size()));

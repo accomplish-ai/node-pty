@@ -112,7 +112,7 @@ if (command === 'child') {
   assert.equal(process.platform, 'win32');
   const entry = resolve(command || '.', 'lib/index.js');
   let failed = false;
-  for (const scenario of (process.argv.slice(3).length ? process.argv.slice(3) : ['natural', 'kill', 'bulk', 'descendant', 'concurrent', 'shutdown'])) {
+  for (const scenario of (process.argv.slice(3).length ? process.argv.slice(3) : ['natural', 'kill', 'kill-ready', 'bulk', 'descendant', 'concurrent', 'shutdown'])) {
     const child = spawn(process.execPath, ['--expose-gc', fileURLToPath(import.meta.url), 'child', entry, scenario],
       { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', timedOut = false;

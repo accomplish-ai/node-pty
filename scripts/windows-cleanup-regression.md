@@ -12,7 +12,8 @@ The environment switch selects the existing bundled ConPTY provider for these
 tests only. A value of `0` selects the system provider. The library default is
 unchanged. Optional scenario names after the package path select individual cases.
 
-The six scenarios cover natural exit and final exit code, repeated kill, all
+The seven scenarios cover natural exit and final exit code, repeated kill before
+and after an interactive shell responds to input, all
 20,000 ordered output rows, descendant termination, concurrent terminals with a
 live resize/input handshake, and Worker termination after a shell has exited but
 its native exit callback is still queued. Each scenario runs five rounds and
@@ -37,7 +38,12 @@ close can produce output EOF. Shared notification state survives both the waiter
 and queued callback, and the finalizer releases the waiter before joining it.
 Raw Node-API status handling avoids throwing back into a terminating Worker.
 JavaScript closes input, drains output, and disposes the worker on natural exit;
-kill enumerates descendants first and repeated calls are idempotent.
+system-provider kill enumerates descendants first and repeated calls are
+idempotent. Bundled-provider kill relies on pseudoconsole close to terminate
+attached descendants, preserving its original provider behavior. It does not
+start an enumeration helper: a bundled shell can still reject `AttachConsole`
+with Windows error 31 during startup before it responds to input. Both early
+kill and descendant termination remain mandatory regressions.
 
 ## Provider qualification
 
