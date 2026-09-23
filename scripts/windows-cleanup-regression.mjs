@@ -4,12 +4,16 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const [command, packagePath, mode] = process.argv.slice(2);
 if (command === 'child') {
   const pty = createRequire(import.meta.url)(packagePath);
+  const nativeTrace = process.env.NODE_PTY_TRACE_CLEANUP === '1'
+    ? createRequire(import.meta.url)(join(dirname(packagePath), '../build/Release/conpty.node')) : undefined;
+  if (nativeTrace) console.log(JSON.stringify({ handlesAtStart: nativeTrace._traceHandles() }));
   const samples = [];
   async function exercise() {
     if (mode === 'shutdown') {
@@ -87,6 +91,7 @@ if (command === 'child') {
     const handles = Number(count.stdout.trim());
     assert.ok(handles > 0);
     samples.push(handles);
+    if (nativeTrace) console.log(JSON.stringify({ round, nativeHandles: nativeTrace._traceHandles() }));
     console.log(JSON.stringify({ round, handles, resources: process.getActiveResourcesInfo() }));
   }
   // Ignore one-time initialization: no per-terminal native handle growth thereafter.

@@ -62,7 +62,7 @@ jobs:
           } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $candidateDirectory 'build-provenance.json')
       - name: Verify cleanup without forced process exit
         run: node scripts/windows-cleanup-regression.mjs .
-      - name: Diagnose attribute-list cleanup
+      - name: Diagnose native handle ownership
         if: ${{ !cancelled() }}
         env:
           NODE_PTY_TRACE_CLEANUP: '1'

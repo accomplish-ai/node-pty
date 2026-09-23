@@ -110,41 +110,42 @@ struct ExitEvent {
 struct ExitDelivered {
   ExitEvent* event;
   ~ExitDelivered() {
-    {
-      std::lock_guard<std::mutex> lock(event->mutex);
-      event->delivered = true;
-    }
+    std::lock_guard<std::mutex> lock(event->mutex);
+    event->delivered = true;
     event->notified.notify_one();
   }
 };
 
+static void DeliverExit(Napi::Env env, Napi::Function cb, void*, ExitEvent* event) {
+  ExitDelivered delivered{event};
+  // The typed callback also runs with an empty env during Worker teardown.
+  // Always release the native waiter, even when calling JS is no longer legal.
+  if (env && cb) {
+    cb.Call({Napi::Number::New(env, event->exit_code)});
+  }
+}
+
 void SetupExitCallback(Napi::Env env, Napi::Function cb, std::shared_ptr<pty_baton> baton) {
   std::thread *th = new std::thread;
   // Don't use Napi::AsyncWorker which is limited by UV_THREADPOOL_SIZE.
-  auto tsfn = Napi::ThreadSafeFunction::New(
+  auto tsfn = Napi::TypedThreadSafeFunction<void, ExitEvent, DeliverExit>::New(
       env,
       cb,                           // JavaScript function called asynchronously
       "SetupExitCallback_resource", // Name
       0,                            // Unlimited queue
       1,                            // Only one thread will use this initially
-      [th](Napi::Env) {   // Finalizer used to clean threads up
+      nullptr,
+      [th](Napi::Env, void*, void*) {   // Finalizer used to clean threads up
         th->join();
         delete th;
       });
   *th = std::thread([tsfn = std::move(tsfn), baton] {
-    auto callback = [](Napi::Env env, Napi::Function cb, ExitEvent *exit_event) {
-      ExitDelivered delivered{exit_event};
-      // Publish the exit code before closing conout can emit a JS socket close.
-      if (env && cb) {
-        cb.Call({Napi::Number::New(env, exit_event->exit_code)});
-      }
-    };
-
     auto exit_event = std::make_unique<ExitEvent>();
     WaitForSingleObject(baton->hShell, INFINITE);
     GetExitCodeProcess(baton->hShell, (LPDWORD)(&exit_event->exit_code));
 
-    auto status = tsfn.BlockingCall(exit_event.get(), callback);
+    // Publish the exit code before closing conout can emit a JS socket close.
+    auto status = tsfn.BlockingCall(exit_event.get());
     if (status == napi_ok) {
       std::unique_lock<std::mutex> lock(exit_event->mutex);
       exit_event->notified.wait(lock, [&] { return exit_event->delivered; });
@@ -487,13 +488,6 @@ static Napi::Value PtyConnect(const Napi::CallbackInfo& info) {
     throw errorWithCode(info, "Cannot create process");
   }
 
-  if (trace_cleanup_enabled()) {
-    trace_cleanup("before-attribute-delete", id);
-    DeleteProcThreadAttributeList(siEx.lpAttributeList);
-    delete[] attrList;
-    trace_cleanup("after-attribute-delete", id);
-  }
-
   HANDLE hLibrary = LoadConptyDll(info, useConptyDll);
   bool fLoadedDll = hLibrary != nullptr;
   if (useConptyDll && fLoadedDll)
@@ -630,7 +624,59 @@ static Napi::Value PtyKill(const Napi::CallbackInfo& info) {
 * Init
 */
 
+// Temporary diagnostic layouts from winsiderss/phnt ntpsapi.h. No handle is
+// duplicated or closed by this snapshot. Query type only, never pipe/file names.
+struct TraceHandleEntry {
+  HANDLE value;
+  SIZE_T handleCount;
+  SIZE_T pointerCount;
+  ACCESS_MASK access;
+  ULONG type;
+  ULONG attributes;
+  ULONG reserved;
+};
+struct TraceHandleSnapshot {
+  ULONG_PTR count;
+  ULONG_PTR reserved;
+  TraceHandleEntry entries[1];
+};
+struct TraceUnicodeString {
+  USHORT length;
+  USHORT capacity;
+  PWSTR buffer;
+};
+static Napi::Value TraceHandles(const Napi::CallbackInfo& info) {
+  using QueryProcess = LONG (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  using QueryObject = LONG (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  auto module = GetModuleHandleW(L"ntdll.dll");
+  auto queryProcess = reinterpret_cast<QueryProcess>(GetProcAddress(module, "NtQueryInformationProcess"));
+  auto queryObject = reinterpret_cast<QueryObject>(GetProcAddress(module, "NtQueryObject"));
+  std::vector<BYTE> buffer(1024 * 1024);
+  ULONG needed = 0;
+  if (queryProcess(GetCurrentProcess(), 51, buffer.data(), static_cast<ULONG>(buffer.size()), &needed) < 0) {
+    throw Napi::Error::New(info.Env(), "Cannot snapshot process handles");
+  }
+  auto snapshot = reinterpret_cast<TraceHandleSnapshot*>(buffer.data());
+  auto result = Napi::Array::New(info.Env());
+  for (ULONG_PTR i = 0; i < snapshot->count; i++) {
+    auto handle = snapshot->entries[i].value;
+    std::vector<BYTE> typeBuffer(4096);
+    if (queryObject(handle, 2, typeBuffer.data(), static_cast<ULONG>(typeBuffer.size()), &needed) < 0) continue;
+    auto type = reinterpret_cast<TraceUnicodeString*>(typeBuffer.data());
+    std::wstring name(type->buffer, type->length / sizeof(wchar_t));
+    auto item = Napi::Object::New(info.Env());
+    item.Set("handle", Napi::Number::New(info.Env(), reinterpret_cast<uintptr_t>(handle)));
+    item.Set("type", Napi::String::New(info.Env(), path_util::wstring_to_string(name)));
+    item.Set("access", Napi::Number::New(info.Env(), snapshot->entries[i].access));
+    if (name == L"Process") item.Set("pid", Napi::Number::New(info.Env(), GetProcessId(handle)));
+    if (name == L"Thread") item.Set("tid", Napi::Number::New(info.Env(), GetThreadId(handle)));
+    result.Set(static_cast<uint32_t>(i), item);
+  }
+  return result;
+}
+
 Napi::Object init(Napi::Env env, Napi::Object exports) {
+  if (trace_cleanup_enabled()) exports.Set("_traceHandles", Napi::Function::New(env, TraceHandles));
   exports.Set("startProcess", Napi::Function::New(env, PtyStartProcess));
   exports.Set("connect", Napi::Function::New(env, PtyConnect));
   exports.Set("resize", Napi::Function::New(env, PtyResize));
