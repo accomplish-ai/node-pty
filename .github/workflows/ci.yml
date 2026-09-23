@@ -156,7 +156,7 @@ jobs:
           VERSION: ${{ needs.assemble-test-package.outputs.version }}
           DIST_TAG: ${{ needs.assemble-test-package.outputs.tag }}
         run: |
-          archive="test-package/accomplish-ai-node-pty-$VERSION.tgz"
+          archive="./test-package/accomplish-ai-node-pty-$VERSION.tgz"
           python scripts/accomplish-package.py --verify "$archive"
           npm publish "$archive" --ignore-scripts --registry https://npm.pkg.github.com --access restricted --tag "$DIST_TAG"
       - name: Verify exact registry version and downloaded archive
