@@ -108,6 +108,37 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'test prerelease'):
             pack.validate_version('1.1.1')
 
+    def test_stable_promotion_preserves_all_implementation_bytes_and_modes(self):
+        source = self.build()
+        target = self.root / 'stable.tgz'
+        digest = pack.sha256(source.read_bytes())
+        pack.promote(source, target, '1.1.1', digest)
+        before, after = pack.read_archive(source), pack.read_archive(target)
+        self.assertEqual(set(before), set(after))
+        for name in before.keys() - {'package.json', pack.PROVENANCE}:
+            self.assertEqual(after[name], before[name], name)
+        receipt = pack.verify(target, allow_stable=True)
+        self.assertEqual(receipt['packageVersion'], '1.1.1')
+        self.assertEqual(receipt['promotion']['archiveSha256'], digest)
+        self.assertEqual(receipt['promotion']['testVersion'], '1.1.1-test.123.1.gabcdef12')
+        with self.assertRaisesRegex(ValueError, 'test prerelease'):
+            pack.verify(target)
+
+    def test_stable_promotion_rejects_wrong_digest_and_unrelated_version(self):
+        source = self.build()
+        for version, digest in [('1.1.1', '0' * 64), ('1.1.2', pack.sha256(source.read_bytes())),
+                                ('1.1.1-test.1', pack.sha256(source.read_bytes()))]:
+            with self.assertRaises(ValueError):
+                pack.promote(source, self.root / 'stable.tgz', version, digest)
+
+    def test_stable_promotion_rejects_tampered_payload(self):
+        source = self.build()
+        entries = pack.read_archive(source)
+        entries['prebuilds/darwin-arm64/pty.node'] = (b'unreviewed native code', 0o755)
+        archive(source, entries)
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            pack.promote(source, self.root / 'stable.tgz', '1.1.1', pack.sha256(source.read_bytes()))
+
     def test_rejects_tampering_after_assembly(self):
         output = self.build()
         entries = pack.read_archive(output)

@@ -1,7 +1,7 @@
-"""Assemble a test-only package from qualified native CI and pinned upstream bytes.
+"""Assemble test packages and explicitly promote qualified bytes to a stable version.
 
 Runs on the Linux publication runner; archive helpers are also tested on Windows.
-No Git tags, stable versions, moving dependency pins, or public npm publication.
+Promotion changes package metadata only. Registry publication belongs to CI.
 """
 import argparse
 import base64
@@ -108,12 +108,17 @@ def assemble(candidate, original, output, version, provenance):
     verify(output)
 
 
-def verify(path):
+def verify(path, allow_stable=False):
     entries = read_archive(path)
     validate_payload(entries)
     receipt = json.loads(entries.pop(PROVENANCE)[0])
     package = json.loads(entries['package.json'][0])
-    validate_version(package['version'])
+    if allow_stable and package['version'] == '1.1.1':
+        promotion = receipt.get('promotion', {})
+        validate_version(promotion.get('testVersion', ''))
+        require(re.fullmatch(r'[a-f0-9]{64}', promotion.get('archiveSha256', '')), 'Missing promotion source digest')
+    else:
+        validate_version(package['version'])
     require(PROVENANCE in package.get('files', []), 'Package file selection omits build provenance')
     require(package['name'] == '@accomplish-ai/node-pty' and receipt['packageVersion'] == package['version'], 'Package identity mismatch')
     require(set(entries) == set(receipt['files']), 'Package checksum file set mismatch')
@@ -121,6 +126,27 @@ def verify(path):
     for name, (data, mode) in entries.items():
         require(receipt['files'][name] == {'sha256': sha256(data), 'mode': mode}, f'Package checksum mismatch: {name}')
     return receipt
+
+
+def promote(source, target, version, expected_sha256):
+    require(version == '1.1.1', 'Only the reviewed 1.1.1 release is supported')
+    require(sha256(Path(source).read_bytes()) == expected_sha256, 'Promotion source archive checksum mismatch')
+    receipt = verify(source)
+    entries = read_archive(source)
+    package, mode = json.loads(entries['package.json'][0]), entries['package.json'][1]
+    require(package['version'].startswith(version + '-test.'), 'Promotion version does not match candidate')
+    receipt['promotion'] = {'testVersion': package['version'], 'archiveSha256': expected_sha256}
+    package['version'] = version
+    entries['package.json'] = (json.dumps(package, indent=2).encode() + b'\n', mode)
+    receipt['packageVersion'] = version
+    receipt['files']['package.json'] = {'sha256': sha256(entries['package.json'][0]), 'mode': mode}
+    entries[PROVENANCE] = (json.dumps(receipt, indent=2, sort_keys=True).encode() + b'\n', 0o644)
+    write_archive(target, entries)
+    verify(target, allow_stable=True)
+    metadata = {'version': version, 'archive': str(Path(target).resolve()),
+                'sha256': sha256(Path(target).read_bytes()), 'integrity': integrity(Path(target).read_bytes())}
+    Path(target).with_name('publication.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    return metadata
 
 
 def validate_run(run, jobs, commit):
@@ -175,9 +201,10 @@ def build_from_run(run_id, output_directory):
     print(json.dumps(metadata, indent=2))
 
 
-def check_registry(metadata_path):
+def check_registry(metadata_path, allow_stable=False):
     metadata = json.loads(Path(metadata_path).read_text())
-    validate_version(metadata['version'])
+    if not (allow_stable and metadata['version'] == '1.1.1'):
+        validate_version(metadata['version'])
     package = '@accomplish-ai/node-pty@' + metadata['version']
     registry = 'https://npm.pkg.github.com'
     published_integrity = json.loads(subprocess.check_output(['npm', 'view', package, 'dist.integrity', '--json', '--registry', registry], text=True))
@@ -190,7 +217,7 @@ def check_registry(metadata_path):
     require(Path(filename).name == filename, 'Unsafe downloaded package filename')
     archive = destination / filename
     require(sha256(archive.read_bytes()) == metadata['sha256'], 'Registry archive differs from qualified archive')
-    receipt = verify(archive)
+    receipt = verify(archive, allow_stable=allow_stable)
     evidence = {'package': package, 'registry': registry, 'integrity': published_integrity,
                 'sha256': metadata['sha256'], 'sourceCommit': receipt['sourceCommit'], 'outcome': 'passed'}
     Path(metadata_path).with_name('registry-verification.json').write_text(json.dumps(evidence, indent=2) + '\n')
@@ -203,11 +230,21 @@ if __name__ == '__main__':
     parser.add_argument('--output', default='test-package')
     parser.add_argument('--verify')
     parser.add_argument('--registry-check')
+    parser.add_argument('--allow-stable', action='store_true')
+    parser.add_argument('--promote')
+    parser.add_argument('--stable-version')
+    parser.add_argument('--expected-sha256')
     args = parser.parse_args()
     if args.verify:
-        verify(args.verify)
+        verify(args.verify, allow_stable=args.allow_stable)
     elif args.registry_check:
-        check_registry(args.registry_check)
+        check_registry(args.registry_check, allow_stable=args.allow_stable)
+    elif args.promote:
+        require(args.stable_version and args.expected_sha256, 'Promotion requires an explicit version and digest')
+        output = Path(args.output)
+        output.mkdir(parents=True, exist_ok=False)
+        print(json.dumps(promote(args.promote, output / f'accomplish-ai-node-pty-{args.stable_version}.tgz',
+                                 args.stable_version, args.expected_sha256), indent=2))
     else:
         require(args.native_run_id, 'An explicit successful native run ID is required')
         build_from_run(args.native_run_id, args.output)

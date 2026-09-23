@@ -72,6 +72,32 @@ This publication step is test-only. A successful package build does not replace
 Sandbox integration tests, natural terminal-owner exit and handle-count checks,
 or the final clean Windows 11 host acceptance.
 
+## Stable release preparation
+
+The CI workflow accepts `prepare_stable_package=true` on the candidate branch.
+This creates version `1.1.1` as a local archive and tests its installation on
+Windows and macOS with Node 20 and 22. It does not publish. The source archive
+is the qualified immutable test package from run `35889321781`, attempt 2,
+pinned by SHA-256. Promotion changes only package metadata and its checksum
+receipt. All implementation bytes and modes remain identical. CI rejects
+source or dependency changes relative to the qualified implementation.
+
+Set `compare_macos_package=true` to compare that exact qualified terminal
+package with upstream 1.1.0 on the same Mac. Each Node version exercises
+30 natural exits and 30 terminations per package after warmup. Checks require
+output/status, shell cleanup, natural owner exit, and no additional descriptor
+growth over upstream. This comparison does not claim upstream has no leaks.
+
+After review, merge, and explicit release approval, dispatch CI on
+`accomplish-1.1` with `publish_stable_package=true`. Publication requires the
+source tests, archive checks, and all four installed stable package jobs to
+pass. It publishes the exact qualified archive privately and verifies registry
+bytes. Stable publication is disabled on PRs, pushes, and the candidate branch.
+It updates the private package's `latest` tag only during this explicit release.
+An existing immutable version cannot be overwritten; inspect registry evidence
+before retrying an interrupted publication. Keep the branch until release is
+complete. Engine and Runtime must pin the published stable version exactly.
+
 ## Local package tests
 
 Run `python scripts/accomplish-package-test.py` with Python 3.12 or later. The
