@@ -12,7 +12,8 @@ permissions:
 jobs:
   native-candidate:
     name: Windows native cleanup (Node ${{ matrix.node }})
-    runs-on: windows-2025
+    # The locked node-gyp supports the Visual Studio 2022 toolchain.
+    runs-on: windows-2022
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -62,8 +63,6 @@ jobs:
             archiveSha256 = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLower()
             qualification = 'Build artifact; inspect subsequent regression result separately'
           } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $candidateDirectory 'build-provenance.json')
-      - name: Verify system ConPTY cleanup without forced process exit
-        run: node scripts/windows-cleanup-regression.mjs .
       - name: Verify bundled ConPTY cleanup without forced process exit
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -77,10 +76,10 @@ jobs:
           path: ${{ runner.temp }}/node-pty-candidate
           if-no-files-found: warn
           retention-days: 30
-  older-host-bundled-validation:
-    name: Bundled ConPTY on Windows 2022 (Node ${{ matrix.node }})
+  newer-host-validation:
+    name: Both ConPTY providers on Windows 2025 (Node ${{ matrix.node }})
     needs: native-candidate
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -97,10 +96,10 @@ jobs:
         with:
           name: node-pty-windows-node${{ matrix.node }}-${{ github.sha }}-${{ github.run_attempt }}
           path: candidate
-      - name: Verify the exact archive and exercise its bundled provider
+      - name: Verify the exact archive and exercise its system provider
         shell: pwsh
         env:
-          NODE_PTY_USE_CONPTY_DLL: '1'
+          NODE_PTY_USE_CONPTY_DLL: '0'
         run: |
           $receipt = Get-Content candidate/build-provenance.json -Raw | ConvertFrom-Json
           if ($receipt.sourceCommit -ne $env:GITHUB_SHA) { throw 'Unexpected candidate source' }
@@ -108,3 +107,7 @@ jobs:
           tar -xf candidate/node-pty-1.1.0.tgz -C candidate
           if ($LASTEXITCODE -ne 0) { throw 'Candidate extraction failed' }
           node scripts/windows-cleanup-regression.mjs candidate/package
+      - name: Exercise the same archive with its bundled provider
+        env:
+          NODE_PTY_USE_CONPTY_DLL: '1'
+        run: node scripts/windows-cleanup-regression.mjs candidate/package
