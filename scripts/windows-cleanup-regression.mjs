@@ -4,7 +4,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -13,9 +12,6 @@ if (command === 'child') {
   const useConptyDll = process.env.NODE_PTY_USE_CONPTY_DLL === '1';
   console.log(JSON.stringify({ provider: useConptyDll ? 'bundled' : 'system', node: process.version }));
   const pty = createRequire(import.meta.url)(packagePath);
-  const nativeTrace = process.env.NODE_PTY_TRACE_CLEANUP === '1'
-    ? createRequire(import.meta.url)(join(dirname(packagePath), '../build/Release/conpty.node')) : undefined;
-  if (nativeTrace) console.log(JSON.stringify({ handlesAtStart: nativeTrace._traceHandles() }));
   const samples = [];
   async function exercise() {
     if (mode === 'shutdown') {
@@ -45,7 +41,6 @@ if (command === 'child') {
     const terminal = pty.spawn(payload ? process.execPath : process.env.ComSpec, payload
       ? [fileURLToPath(new URL('./windows-cleanup-payload.cjs', import.meta.url)), mode]
       : natural ? ['/d', '/c', 'echo CLEANUP_FINAL_OUTPUT & exit /b 7'] : ['/d', '/q'], { cols: 120, rows: 24, useConptyDll });
-    if (nativeTrace) console.log(JSON.stringify({ spawnedShell: terminal.pid, liveHandles: nativeTrace._traceHandles() }));
     let output = '';
     let resized = false;
     const data = terminal.onData(value => {
@@ -103,7 +98,6 @@ if (command === 'child') {
     const handles = Number(count.stdout.trim());
     assert.ok(handles > 0);
     samples.push(handles);
-    if (nativeTrace) console.log(JSON.stringify({ round, nativeHandles: nativeTrace._traceHandles() }));
     console.log(JSON.stringify({ round, handles, resources: process.getActiveResourcesInfo() }));
   }
   // Ignore one-time initialization: no per-terminal native handle growth thereafter.

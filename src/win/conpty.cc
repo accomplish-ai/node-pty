@@ -40,22 +40,6 @@ typedef void (__stdcall *PFNRELEASEPSEUDOCONSOLE)(HPCON hpc);
 
 #endif
 
-// Temporary CI experiment: removed before the candidate is released.
-static bool trace_cleanup_enabled() {
-  wchar_t value[2];
-  return GetEnvironmentVariableW(L"NODE_PTY_TRACE_CLEANUP", value, 2) == 1 && value[0] == L'1';
-}
-
-static void trace_cleanup(const char* phase, int id, HANDLE shell = nullptr) {
-  if (trace_cleanup_enabled()) {
-    DWORD count = 0;
-    GetProcessHandleCount(GetCurrentProcess(), &count);
-    std::cerr << "cleanup-native " << phase << " id=" << id << " handles=" << count;
-    if (shell) std::cerr << " shellHandle=" << reinterpret_cast<uintptr_t>(shell) << " shellPid=" << GetProcessId(shell);
-    std::cerr << std::endl;
-  }
-}
-
 struct pty_baton {
   int id;
   HANDLE hIn;
@@ -69,9 +53,7 @@ struct pty_baton {
   pty_baton(int _id, HANDLE _hIn, HANDLE _hOut, HPCON _hpc, PFNCLOSEPSEUDOCONSOLE close) :
     id(_id), hIn(_hIn), hOut(_hOut), hpc(_hpc), closePseudoConsole(close) {};
   ~pty_baton() {
-    trace_cleanup("before-shell-close", id, hShell);
     if (hShell) CloseHandle(hShell);
-    trace_cleanup("after-shell-close", id);
   }
 };
 
@@ -184,7 +166,6 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, std::shared_ptr<pty_bat
     // Close may wait for output to drain. Never block the JS reader or hold the
     // registry lock here. This thread is the sole owner of pseudoconsole close.
     baton->closePseudoConsole(hpc);
-    trace_cleanup("after-pseudoconsole-close", baton->id);
     remove_pty_baton(baton->id);
     switch (status) {
       case napi_closing:
@@ -649,68 +630,7 @@ static Napi::Value PtyKill(const Napi::CallbackInfo& info) {
 * Init
 */
 
-// Temporary diagnostic layouts from winsiderss/phnt ntpsapi.h. No handle is
-// duplicated or closed by this snapshot. Query type only, never pipe/file names.
-struct TraceHandleEntry {
-  HANDLE value;
-  SIZE_T handleCount;
-  SIZE_T pointerCount;
-  ACCESS_MASK access;
-  ULONG type;
-  ULONG attributes;
-  ULONG reserved;
-};
-struct TraceHandleSnapshot {
-  ULONG_PTR count;
-  ULONG_PTR reserved;
-  TraceHandleEntry entries[1];
-};
-struct TraceUnicodeString {
-  USHORT length;
-  USHORT capacity;
-  PWSTR buffer;
-};
-static Napi::Value TraceHandles(const Napi::CallbackInfo& info) {
-  using QueryProcess = LONG (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-  using QueryObject = LONG (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-  auto module = GetModuleHandleW(L"ntdll.dll");
-  auto queryProcess = reinterpret_cast<QueryProcess>(GetProcAddress(module, "NtQueryInformationProcess"));
-  auto queryObject = reinterpret_cast<QueryObject>(GetProcAddress(module, "NtQueryObject"));
-  std::vector<BYTE> buffer(1024 * 1024);
-  ULONG needed = 0;
-  if (queryProcess(GetCurrentProcess(), 51, buffer.data(), static_cast<ULONG>(buffer.size()), &needed) < 0) {
-    throw Napi::Error::New(info.Env(), "Cannot snapshot process handles");
-  }
-  auto snapshot = reinterpret_cast<TraceHandleSnapshot*>(buffer.data());
-  auto result = Napi::Array::New(info.Env());
-  for (ULONG_PTR i = 0; i < snapshot->count; i++) {
-    auto handle = snapshot->entries[i].value;
-    std::vector<BYTE> typeBuffer(4096);
-    if (queryObject(handle, 2, typeBuffer.data(), static_cast<ULONG>(typeBuffer.size()), &needed) < 0) continue;
-    auto type = reinterpret_cast<TraceUnicodeString*>(typeBuffer.data());
-    std::wstring name(type->buffer, type->length / sizeof(wchar_t));
-    auto item = Napi::Object::New(info.Env());
-    item.Set("handle", Napi::Number::New(info.Env(), reinterpret_cast<uintptr_t>(handle)));
-    item.Set("type", Napi::String::New(info.Env(), path_util::wstring_to_string(name)));
-    item.Set("access", Napi::Number::New(info.Env(), snapshot->entries[i].access));
-    if (name == L"Process") {
-      item.Set("pid", Napi::Number::New(info.Env(), GetProcessId(handle)));
-      DWORD exitCode = 0;
-      if (GetExitCodeProcess(handle, &exitCode)) item.Set("exitCode", Napi::Number::New(info.Env(), exitCode));
-      wchar_t imagePath[32768];
-      DWORD length = 32768;
-      if (QueryFullProcessImageNameW(handle, 0, imagePath, &length)) {
-        item.Set("image", Napi::String::New(info.Env(), path_util::wstring_to_string(std::wstring(imagePath, length))));
-      }
-    }
-    if (name == L"Thread") item.Set("tid", Napi::Number::New(info.Env(), GetThreadId(handle)));
-    result.Set(static_cast<uint32_t>(i), item);
-  }
-  return result;
-}
-
 Napi::Object init(Napi::Env env, Napi::Object exports) {
-  if (trace_cleanup_enabled()) exports.Set("_traceHandles", Napi::Function::New(env, TraceHandles));
   exports.Set("startProcess", Napi::Function::New(env, PtyStartProcess));
   exports.Set("connect", Napi::Function::New(env, PtyConnect));
   exports.Set("resize", Napi::Function::New(env, PtyResize));
