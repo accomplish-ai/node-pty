@@ -11,9 +11,14 @@ permissions:
 
 jobs:
   diagnostic-existing-binary:
-    name: Attribute handles using the previous diagnostic binary
-    runs-on: windows-2022
+    name: Attribute handles (${{ matrix.os }}, ${{ matrix.provider }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        provider: [system, bundled]
     permissions:
       contents: read
       actions: read
@@ -34,6 +39,7 @@ jobs:
         shell: pwsh
         env:
           NODE_PTY_TRACE_CLEANUP: '1'
+          NODE_PTY_USE_CONPTY_DLL: ${{ matrix.provider == 'bundled' && '1' || '0' }}
         run: |
           $receipt = Get-Content previous-diagnostic/build-provenance.json -Raw | ConvertFrom-Json
           if ($receipt.sourceCommit -ne '0ccaf30700fc1548d9ec9d57e728ab10f07efcb3') { throw 'Unexpected diagnostic source' }
@@ -42,6 +48,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Diagnostic extraction failed' }
           New-Item -ItemType Directory previous-diagnostic/package/build | Out-Null
           Copy-Item previous-diagnostic/package/prebuilds/win32-x64 previous-diagnostic/package/build/Release -Recurse
+          ./scripts/windows-os-control.ps1 -WithShell
           node --expose-gc scripts/windows-cleanup-regression.mjs child "$PWD/previous-diagnostic/package/lib/index.js" natural
   native-candidate:
     name: Windows native cleanup (Node ${{ matrix.node }})

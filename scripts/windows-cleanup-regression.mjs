@@ -10,6 +10,8 @@ import { Worker } from 'node:worker_threads';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const [command, packagePath, mode] = process.argv.slice(2);
 if (command === 'child') {
+  const useConptyDll = process.env.NODE_PTY_USE_CONPTY_DLL === '1';
+  console.log(JSON.stringify({ provider: useConptyDll ? 'bundled' : 'system', node: process.version }));
   const pty = createRequire(import.meta.url)(packagePath);
   const nativeTrace = process.env.NODE_PTY_TRACE_CLEANUP === '1'
     ? createRequire(import.meta.url)(join(dirname(packagePath), '../build/Release/conpty.node')) : undefined;
@@ -19,12 +21,12 @@ if (command === 'child') {
     if (mode === 'shutdown') {
       const worker = new Worker(`
         const { parentPort, workerData } = require('node:worker_threads');
-        const pty = require(workerData);
-        const terminal = pty.spawn(process.env.ComSpec, ['/d', '/c', 'exit /b 7']);
+        const pty = require(workerData.packagePath);
+        const terminal = pty.spawn(process.env.ComSpec, ['/d', '/c', 'exit /b 7'], { useConptyDll: workerData.useConptyDll });
         parentPort.postMessage(terminal.pid);
         // Hold JS while native exit notification queues, then destroy this env.
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
-      `, { eval: true, workerData: packagePath });
+      `, { eval: true, workerData: { packagePath, useConptyDll } });
       const shell = await new Promise((resolve, reject) => {
         worker.once('message', resolve);
         worker.once('error', reject);
@@ -42,7 +44,7 @@ if (command === 'child') {
     const payload = mode === 'bulk' || mode === 'descendant' || mode === 'concurrent';
     const terminal = pty.spawn(payload ? process.execPath : process.env.ComSpec, payload
       ? [fileURLToPath(new URL('./windows-cleanup-payload.cjs', import.meta.url)), mode]
-      : natural ? ['/d', '/c', 'echo CLEANUP_FINAL_OUTPUT & exit /b 7'] : ['/d', '/q'], { cols: 120, rows: 24 });
+      : natural ? ['/d', '/c', 'echo CLEANUP_FINAL_OUTPUT & exit /b 7'] : ['/d', '/q'], { cols: 120, rows: 24, useConptyDll });
     if (nativeTrace) console.log(JSON.stringify({ spawnedShell: terminal.pid, liveHandles: nativeTrace._traceHandles() }));
     let output = '';
     let resized = false;
