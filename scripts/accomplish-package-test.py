@@ -30,7 +30,7 @@ class PackageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.candidate = {
-            'package.json': (json.dumps({'name': 'node-pty', 'version': '1.1.0', 'scripts': {'install': 'node scripts/prebuild.js || node-gyp rebuild'}}).encode(), 0o644),
+            'package.json': (json.dumps({'name': 'node-pty', 'version': '1.1.0', 'files': ['lib/', 'src/', 'prebuilds/'], 'scripts': {'install': 'node scripts/prebuild.js || node-gyp rebuild'}}).encode(), 0o644),
             'src/unix/pty.cc': (b'unchanged unix native source', 0o644),
             'lib/windowsPtyAgent.js': (b'new javascript', 0o644),
             **{f'prebuilds/win32-x64/{name}': (b'new ' + name.encode(), 0o644) for name in pack.WINDOWS_REQUIRED},
@@ -48,7 +48,7 @@ class PackageTests(unittest.TestCase):
         archive(candidate, self.candidate)
         archive(original, self.original)
         output = self.root / 'result.tgz'
-        pack.assemble(candidate, original, output, '1.1.1-test.123.1.abcdef12', {'sourceCommit': 'a' * 40})
+        pack.assemble(candidate, original, output, '1.1.1-test.123.1.gabcdef12', {'sourceCommit': 'a' * 40})
         return output
 
     def test_output_preserves_macos_bytes_modes_and_new_windows_only(self):
@@ -56,11 +56,23 @@ class PackageTests(unittest.TestCase):
         entries = pack.read_archive(output)
         package = json.loads(entries['package.json'][0])
         self.assertEqual(package['name'], '@accomplish-ai/node-pty')
-        self.assertEqual(package['version'], '1.1.1-test.123.1.abcdef12')
+        self.assertEqual(package['version'], '1.1.1-test.123.1.gabcdef12')
         self.assertEqual(entries['prebuilds/darwin-arm64/spawn-helper'], self.original['prebuilds/darwin-arm64/spawn-helper'])
         self.assertEqual(entries['prebuilds/win32-x64/conpty.node'][0], b'new conpty.node')
         self.assertFalse(any('win32-arm64' in name for name in entries))
         pack.verify(output)
+
+    def test_receipt_is_in_archive_and_declared_file_selection(self):
+        entries = pack.read_archive(self.build())
+        package = json.loads(entries['package.json'][0])
+        self.assertIn(pack.PROVENANCE, entries)
+        self.assertEqual(package['files'], ['lib/', 'src/', 'prebuilds/', pack.PROVENANCE])
+        self.assertEqual(package['files'].count(pack.PROVENANCE), 1)
+
+    def test_numeric_sha_prefix_is_valid_non_numeric_semver_identifier(self):
+        pack.validate_version('1.1.1-test.123.1.g01234567')
+        with self.assertRaisesRegex(ValueError, 'test prerelease'):
+            pack.validate_version('1.1.1-test.123.1.01234567')
 
     def test_rejects_stale_build_payload(self):
         self.candidate['build/Release/conpty.node'] = (b'stale', 0o644)

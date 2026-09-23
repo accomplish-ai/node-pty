@@ -49,6 +49,8 @@ const testEnvironment = {
 run([join(source, 'node_modules', 'mocha', 'bin', 'mocha.js'), '-R', 'spec', '--exit', 'lib/*.test.js'], installed, testEnvironment);
 if (process.platform === 'win32') {
   // This harness requires natural owner exit and does not force the event loop.
-  run([join(source, 'scripts', 'windows-cleanup-regression.mjs'), installed]);
+  const harness = [join(source, 'scripts', 'windows-cleanup-regression.mjs'), installed];
+  run(harness, source, { ...process.env, NODE_PTY_USE_CONPTY_DLL: '0' });
+  run(harness, source, { ...process.env, NODE_PTY_USE_CONPTY_DLL: '1' });
 }
 console.log(JSON.stringify({ outcome: 'passed', version: metadata.version, sha256: metadata.sha256, platform: process.platform, arch: process.arch, node: process.version }));

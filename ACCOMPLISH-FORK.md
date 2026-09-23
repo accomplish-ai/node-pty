@@ -11,11 +11,18 @@ The existing **CI** workflow accepts a manual dispatch on
 `codex/windows-conpty-cleanup`. Set `publish_test_package` to `true` and supply a
 successful **Windows cleanup candidate** `native_run_id` for that exact commit.
 Publication remains disabled by default and cannot run on pull requests.
-The Linux, macOS and Windows source test jobs must all pass. The final assembled
-archive is then installed on Windows and macOS with Node 20 and Node 22. The
-upstream tests run against its installed implementation and Windows also runs
-the natural-exit cleanup harness. All four installed-package jobs must pass
-before publication starts.
+The Linux, macOS and Windows Server 2022 source test jobs must all pass. The
+final assembled archive is then installed on Windows Server 2025 and macOS 14
+with Node 20 and Node 22. The upstream tests run against its installed
+implementation. Windows also runs the natural-exit cleanup harness twice:
+once with the system ConPTY provider and once with the bundled ConPTY DLL.
+All four installed-package jobs must pass before publication starts.
+
+Native qualification separately checks both providers on Windows Server 2025
+and the bundled provider on Windows Server 2022. Diagnostics found that Server
+2022's system provider retains a console-host reference; that provider is not
+qualified by these cleanup checks. The Server 2025 evidence does not replace
+final acceptance on a clean Windows 11 host.
 
 The assembler checks the native run's repository, source commit, workflow,
 successful Node 20 and Node 22 jobs, artifact provenance and archive checksums.
@@ -27,7 +34,9 @@ upstream npm archive is pinned by SHA-512, and unchanged Unix native sources
 are required. No `build/` payload can shadow the selected prebuilds.
 
 Packages are published privately to GitHub Packages as
-`@accomplish-ai/node-pty@1.1.1-test.<publication-run>.<attempt>.<source-sha8>`.
+`@accomplish-ai/node-pty@1.1.1-test.<publication-run>.<attempt>.g<source-sha8>`.
+The `g` prefix keeps an all-numeric SHA fragment valid as a SemVer prerelease
+identifier even when it begins with zero.
 Each publication has a unique `test-<run>-<attempt>` tag. The workflow creates
 no Git tags or stable releases and does not update `latest`.
 Every file's checksum and mode, both native build receipts and the source
@@ -38,7 +47,7 @@ archive. Keep the publication receipt with integration evidence.
 Engine can keep its existing imports using an exact npm alias:
 
 ```json
-"node-pty": "npm:@accomplish-ai/node-pty@1.1.1-test.<run>.<attempt>.<sha8>"
+"node-pty": "npm:@accomplish-ai/node-pty@1.1.1-test.<run>.<attempt>.g<sha8>"
 ```
 
 Use the actual immutable version returned by a successful publication. Do not

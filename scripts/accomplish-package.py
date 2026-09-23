@@ -37,7 +37,7 @@ def integrity(data):
 
 
 def validate_version(version):
-    require(re.fullmatch(r'1\.1\.1-test\.[1-9][0-9]*\.[1-9][0-9]*\.[a-f0-9]{8}', version), 'Expected immutable test prerelease version')
+    require(re.fullmatch(r'1\.1\.1-test\.[1-9][0-9]*\.[1-9][0-9]*\.g[a-f0-9]{8}', version), 'Expected immutable test prerelease version')
 
 
 def read_archive(path):
@@ -97,6 +97,7 @@ def assemble(candidate, original, output, version, provenance):
     package.update(name='@accomplish-ai/node-pty', version=version,
                    repository={'type': 'git', 'url': 'https://github.com/accomplish-ai/node-pty.git'},
                    publishConfig={'registry': 'https://npm.pkg.github.com', 'access': 'restricted'})
+    package['files'] = list(dict.fromkeys([*package.get('files', []), PROVENANCE]))
     entries['package.json'] = (json.dumps(package, indent=2).encode() + b'\n', 0o644)
     receipt = {**provenance, 'schemaVersion': 1, 'upstreamCommit': UPSTREAM_COMMIT,
                'upstreamIntegrity': UPSTREAM_INTEGRITY, 'packageVersion': version,
@@ -113,6 +114,7 @@ def verify(path):
     receipt = json.loads(entries.pop(PROVENANCE)[0])
     package = json.loads(entries['package.json'][0])
     validate_version(package['version'])
+    require(PROVENANCE in package.get('files', []), 'Package file selection omits build provenance')
     require(package['name'] == '@accomplish-ai/node-pty' and receipt['packageVersion'] == package['version'], 'Package identity mismatch')
     require(set(entries) == set(receipt['files']), 'Package checksum file set mismatch')
     require(not any(name.startswith('prebuilds/') and name.split('/')[1] not in ('win32-x64', 'darwin-arm64', 'darwin-x64') for name in entries), 'Unqualified prebuild in package')
@@ -161,7 +163,7 @@ def build_from_run(run_id, output_directory):
     with urllib.request.urlopen('https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz') as response:
         original.write_bytes(response.read())
     require(integrity(original.read_bytes()) == UPSTREAM_INTEGRITY, 'Upstream npm archive integrity mismatch')
-    version = f'1.1.1-test.{os.environ["GITHUB_RUN_ID"]}.{os.environ["GITHUB_RUN_ATTEMPT"]}.{commit[:8]}'
+    version = f'1.1.1-test.{os.environ["GITHUB_RUN_ID"]}.{os.environ["GITHUB_RUN_ATTEMPT"]}.g{commit[:8]}'
     archive = output / f'accomplish-ai-node-pty-{version}.tgz'
     assemble(archives[1], original, archive, version, {'sourceCommit': commit, 'nativeRunId': run_id,
              'nativeRunAttempt': run['run_attempt'], 'nativeArtifacts': receipts,
