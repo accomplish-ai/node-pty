@@ -61,6 +61,11 @@ if (command === 'child') {
     }
     if (!natural && mode !== 'bulk') {
       await delay(500);
+      if (mode === 'kill-ready') {
+        terminal.write('echo KILL_^READY\r');
+        for (let n = 0; n < 100 && !output.includes('KILL_READY'); n++) { await delay(50); }
+        assert.ok(output.includes('KILL_READY'), 'interactive shell did not respond before kill');
+      }
       terminal.kill();
       terminal.kill();
     }
