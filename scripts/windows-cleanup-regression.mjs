@@ -39,16 +39,19 @@ if (command === 'child') {
       return;
     }
     const natural = mode === 'natural' || mode === 'concurrent';
-    const payload = mode === 'bulk' || mode === 'descendant';
+    const payload = mode === 'bulk' || mode === 'descendant' || mode === 'concurrent';
     const terminal = pty.spawn(payload ? process.execPath : process.env.ComSpec, payload
       ? [fileURLToPath(new URL('./windows-cleanup-payload.cjs', import.meta.url)), mode]
       : natural ? ['/d', '/c', 'echo CLEANUP_FINAL_OUTPUT & exit /b 7'] : ['/d', '/q'], { cols: 120, rows: 24 });
+    if (nativeTrace) console.log(JSON.stringify({ spawnedShell: terminal.pid, liveHandles: nativeTrace._traceHandles() }));
     let output = '';
+    let resized = false;
     const data = terminal.onData(value => {
       output += value;
-      if (mode === 'concurrent') {
-        try { terminal.resize(121, 25); }
-        catch (error) { assert.match(error.message, /Cannot resize a pty that has already exited/); }
+      if (mode === 'concurrent' && !resized && output.includes('CONCURRENT_READY')) {
+        resized = true;
+        terminal.resize(121, 25);
+        terminal.write('go\r');
       }
     });
     let exit;

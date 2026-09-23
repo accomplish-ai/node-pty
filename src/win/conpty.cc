@@ -123,7 +123,17 @@ static void DeliverExit(Napi::Env env, Napi::Function cb, void*, ExitEvent* even
   // The typed callback also runs with an empty env during Worker teardown.
   // Always release the native waiter, even when calling JS is no longer legal.
   if (env && cb) {
-    cb.Call({Napi::Number::New(env, event->exit_code)});
+    napi_value code;
+    napi_value receiver;
+    napi_status status = napi_create_int32(env, event->exit_code, &code);
+    if (status == napi_ok) status = napi_get_undefined(env, &receiver);
+    if (status == napi_ok) status = napi_call_function(env, receiver, cb, 1, &code, nullptr);
+    // A terminating Worker may still provide a non-null env. Napi::Function::Call
+    // would throw a C++ Error here, then try to throw into that dying JS env.
+    // Leave a pending exception with Node; termination cannot execute JS at all.
+    if (status != napi_ok && status != napi_pending_exception && status != napi_cannot_run_js) {
+      Napi::Error::Fatal("SetupExitCallback", "Cannot deliver process exit");
+    }
   }
 }
 
