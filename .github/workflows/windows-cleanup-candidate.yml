@@ -62,6 +62,11 @@ jobs:
           } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $candidateDirectory 'build-provenance.json')
       - name: Verify cleanup without forced process exit
         run: node scripts/windows-cleanup-regression.mjs .
+      - name: Diagnose attribute-list cleanup
+        if: ${{ !cancelled() }}
+        env:
+          NODE_PTY_TRACE_CLEANUP: '1'
+        run: node --expose-gc scripts/windows-cleanup-regression.mjs child "$PWD/lib/index.js" natural
       - name: Preserve build artifact and provenance
         if: always()
         uses: actions/upload-artifact@v4

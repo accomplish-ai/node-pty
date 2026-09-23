@@ -40,6 +40,20 @@ typedef void (__stdcall *PFNRELEASEPSEUDOCONSOLE)(HPCON hpc);
 
 #endif
 
+// Temporary CI experiment: removed before the candidate is released.
+static bool trace_cleanup_enabled() {
+  wchar_t value[2];
+  return GetEnvironmentVariableW(L"NODE_PTY_TRACE_CLEANUP", value, 2) == 1 && value[0] == L'1';
+}
+
+static void trace_cleanup(const char* phase, int id) {
+  if (trace_cleanup_enabled()) {
+    DWORD count = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &count);
+    std::cerr << "cleanup-native " << phase << " id=" << id << " handles=" << count << std::endl;
+  }
+}
+
 struct pty_baton {
   int id;
   HANDLE hIn;
@@ -53,7 +67,9 @@ struct pty_baton {
   pty_baton(int _id, HANDLE _hIn, HANDLE _hOut, HPCON _hpc, PFNCLOSEPSEUDOCONSOLE close) :
     id(_id), hIn(_hIn), hOut(_hOut), hpc(_hpc), closePseudoConsole(close) {};
   ~pty_baton() {
+    trace_cleanup("before-shell-close", id);
     if (hShell) CloseHandle(hShell);
+    trace_cleanup("after-shell-close", id);
   }
 };
 
@@ -142,6 +158,7 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, std::shared_ptr<pty_bat
     // Close may wait for output to drain. Never block the JS reader or hold the
     // registry lock here. This thread is the sole owner of pseudoconsole close.
     baton->closePseudoConsole(hpc);
+    trace_cleanup("after-pseudoconsole-close", baton->id);
     remove_pty_baton(baton->id);
     switch (status) {
       case napi_closing:
@@ -468,6 +485,13 @@ static Napi::Value PtyConnect(const Napi::CallbackInfo& info) {
   );
   if (!fSuccess) {
     throw errorWithCode(info, "Cannot create process");
+  }
+
+  if (trace_cleanup_enabled()) {
+    trace_cleanup("before-attribute-delete", id);
+    DeleteProcThreadAttributeList(siEx.lpAttributeList);
+    delete[] attrList;
+    trace_cleanup("after-attribute-delete", id);
   }
 
   HANDLE hLibrary = LoadConptyDll(info, useConptyDll);

@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { Worker } from 'node:worker_threads';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const [command, packagePath, mode] = process.argv.slice(2);
@@ -11,6 +12,28 @@ if (command === 'child') {
   const pty = createRequire(import.meta.url)(packagePath);
   const samples = [];
   async function exercise() {
+    if (mode === 'shutdown') {
+      const worker = new Worker(`
+        const { parentPort, workerData } = require('node:worker_threads');
+        const pty = require(workerData);
+        const terminal = pty.spawn(process.env.ComSpec, ['/d', '/c', 'exit /b 7']);
+        parentPort.postMessage(terminal.pid);
+        // Hold JS while native exit notification queues, then destroy this env.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      `, { eval: true, workerData: packagePath });
+      const shell = await new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      let exited = false;
+      for (let n = 0; n < 100 && !exited; n++) {
+        try { process.kill(shell, 0); await delay(50); }
+        catch (error) { assert.equal(error.code, 'ESRCH'); exited = true; }
+      }
+      assert.ok(exited, 'shell did not exit before worker termination');
+      await worker.terminate();
+      return;
+    }
     const natural = mode === 'natural';
     const payload = mode === 'bulk' || mode === 'descendant';
     const terminal = pty.spawn(payload ? process.execPath : process.env.ComSpec, payload
@@ -73,7 +96,7 @@ if (command === 'child') {
   assert.equal(process.platform, 'win32');
   const entry = resolve(command || '.', 'lib/index.js');
   let failed = false;
-  for (const scenario of ['natural', 'kill', 'bulk', 'descendant']) {
+  for (const scenario of (process.argv.slice(3).length ? process.argv.slice(3) : ['natural', 'kill', 'bulk', 'descendant', 'shutdown'])) {
     const child = spawn(process.execPath, ['--expose-gc', fileURLToPath(import.meta.url), 'child', entry, scenario],
       { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', timedOut = false;
