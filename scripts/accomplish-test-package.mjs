@@ -34,9 +34,9 @@ for (const [name, expected] of Object.entries(provenance.files)) {
 const pty = createRequire(import.meta.url)(installed);
 assert.equal(typeof pty.spawn, 'function');
 
-// npm excludes upstream tests/fixtures. Add only their independently compiled
-// test files to the disposable install; all implementation/native files remain
-// the bytes from the assembled archive.
+// Run tests compiled from this checkout against the qualified archive. Replace
+// only test files and fixtures in this disposable install; implementation and
+// native files retain the archive bytes verified above.
 for (const name of readdirSync(join(source, 'lib')).filter(name => name.endsWith('.test.js'))) {
   cpSync(join(source, 'lib', name), join(installed, 'lib', name));
 }
