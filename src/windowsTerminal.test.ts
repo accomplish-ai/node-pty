@@ -20,7 +20,7 @@ interface IWindowsProcessTreeResult {
 }
 
 function pollForProcessState(desiredState: IProcessState, intervalMs: number = 100, timeoutMs: number = 2000): Promise<void> {
-  return new Promise<void>(resolve => {
+  return new Promise<void>((resolve, reject) => {
     let tries = 0;
     const interval = setInterval(() => {
       psList({ all: true }).then(ps => {
@@ -50,15 +50,17 @@ function pollForProcessState(desiredState: IProcessState, intervalMs: number = 1
           clearInterval(interval);
           const processListing = pids.map(k => `${k}: ${desiredState[k]}`).join('\n');
           assert.fail(`Bad process state, expected:\n${processListing}`);
-          resolve();
         }
+      }).catch(error => {
+        clearInterval(interval);
+        reject(error);
       });
     }, intervalMs);
   });
 }
 
 function pollForProcessTreeSize(pid: number, size: number, intervalMs: number = 100, timeoutMs: number = 2000): Promise<IWindowsProcessTreeResult[]> {
-  return new Promise<IWindowsProcessTreeResult[]>(resolve => {
+  return new Promise<IWindowsProcessTreeResult[]>((resolve, reject) => {
     let tries = 0;
     const interval = setInterval(() => {
       psList({ all: true }).then(ps => {
@@ -86,12 +88,25 @@ function pollForProcessTreeSize(pid: number, size: number, intervalMs: number = 
           clearInterval(interval);
           assert.fail(`Bad process state, expected: ${size}, actual: ${list.length}`);
         }
+      }).catch(error => {
+        clearInterval(interval);
+        reject(error);
       });
     }, intervalMs);
   });
 }
 
 if (process.platform === 'win32') {
+  describe('Windows process polling', () => {
+    it('rejects when the requested process tree never appears', async function () {
+      this.timeout(2000);
+      await assert.rejects(pollForProcessTreeSize(process.pid, 0, 100, 200), /Bad process state/);
+    });
+    it('rejects when a required process exit never occurs', async function () {
+      this.timeout(2000);
+      await assert.rejects(pollForProcessState({ [process.pid]: false }, 100, 200), /Bad process state/);
+    });
+  });
   [[false, false], [true, false], [true, true]].forEach(([useConpty, useConptyDll]) => {
     describe(`WindowsTerminal (useConpty = ${useConpty}, useConptyDll = ${useConptyDll})`, () => {
       describe('kill', () => {
@@ -101,28 +116,31 @@ if (process.platform === 'win32') {
           term.on('exit', () => done());
           term.kill();
         });
-        it('should kill the process tree', function (done: Mocha.Done): void {
+        it('should kill the process tree', async function (): Promise<void> {
           this.timeout(20000);
           const term = new WindowsTerminal('cmd.exe', [], { useConpty, useConptyDll });
-          // Start sub-processes
-          term.write('powershell.exe\r');
-          term.write('node.exe\r');
-          console.log('start poll for tree size');
-          pollForProcessTreeSize(term.pid, 3, 500, 5000).then(list => {
+          let killRequested = false;
+          try {
+            // Let PowerShell launch its child directly instead of racing its interactive startup.
+            term.write('powershell.exe -NoLogo -NoProfile -Command "node.exe -e \'setInterval(function () {}, 1000)\'"\r');
+            const list = await pollForProcessTreeSize(term.pid, 3, 500, 5000);
             assert.strictEqual(list[0].name.toLowerCase(), 'cmd.exe');
             assert.strictEqual(list[1].name.toLowerCase(), 'powershell.exe');
             assert.strictEqual(list[2].name.toLowerCase(), 'node.exe');
-            term.kill();
             const desiredState: IProcessState = {};
             desiredState[list[0].pid] = false;
             desiredState[list[1].pid] = false;
             desiredState[list[2].pid] = false;
-            term.on('exit', () => {
-              pollForProcessState(desiredState, 1000, 5000).then(() => {
-                done();
-              });
-            });
-          });
+            const exited = new Promise<void>(resolve => term.once('exit', resolve));
+            killRequested = true;
+            term.kill();
+            await exited;
+            await pollForProcessState(desiredState, 1000, 5000);
+          } finally {
+            if (!killRequested) {
+              term.kill();
+            }
+          }
         });
       });
 
