@@ -17,6 +17,7 @@ interface IProcessState {
 interface IWindowsProcessTreeResult {
   name: string;
   pid: number;
+  ppid: number;
 }
 
 function pollForProcessState(desiredState: IProcessState, intervalMs: number = 100, timeoutMs: number = 2000): Promise<void> {
@@ -66,13 +67,13 @@ function pollForProcessTreeSize(pid: number, size: number, intervalMs: number = 
       psList({ all: true }).then(ps => {
         const openList: IWindowsProcessTreeResult[] = [];
         openList.push(ps.filter(p => p.pid === pid).map(p => {
-          return { name: p.name, pid: p.pid };
+          return { name: p.name, pid: p.pid, ppid: p.ppid };
         })[0]);
         const list: IWindowsProcessTreeResult[] = [];
         while (openList.length) {
           const current = openList.shift()!;
           ps.filter(p => p.ppid === current.pid).map(p => {
-            return { name: p.name, pid: p.pid };
+            return { name: p.name, pid: p.pid, ppid: p.ppid };
           }).forEach(p => openList.push(p));
           list.push(current);
         }
@@ -118,15 +119,17 @@ if (process.platform === 'win32') {
         });
         it('should kill the process tree', async function (): Promise<void> {
           this.timeout(20000);
-          const term = new WindowsTerminal('cmd.exe', [], { useConpty, useConptyDll });
+          const fixture = path.resolve(__dirname, '..', 'fixtures', 'process-tree.js');
+          const term = new WindowsTerminal(process.execPath, [fixture, '2'], { useConpty, useConptyDll });
           let killRequested = false;
           try {
-            // Let PowerShell launch its child directly instead of racing its interactive startup.
-            term.write('powershell.exe -NoLogo -NoProfile -Command "node.exe -e \'setInterval(function () {}, 1000)\'"\r');
             const list = await pollForProcessTreeSize(term.pid, 3, 500, 5000);
-            assert.strictEqual(list[0].name.toLowerCase(), 'cmd.exe');
-            assert.strictEqual(list[1].name.toLowerCase(), 'powershell.exe');
-            assert.strictEqual(list[2].name.toLowerCase(), 'node.exe');
+            for (const entry of list) {
+              assert.strictEqual(entry.name.toLowerCase(), path.basename(process.execPath).toLowerCase());
+            }
+            assert.strictEqual(list[0].pid, term.pid);
+            assert.strictEqual(list[1].ppid, list[0].pid);
+            assert.strictEqual(list[2].ppid, list[1].pid);
             const desiredState: IProcessState = {};
             desiredState[list[0].pid] = false;
             desiredState[list[1].pid] = false;
