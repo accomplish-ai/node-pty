@@ -1,9 +1,189 @@
 name: CI
 
 on:
+  push:
+    branches: [codex/windows-conpty-cleanup]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_test_package:
+        description: Publish a unique private test prerelease after all checks pass
+        type: boolean
+        default: false
+      native_run_id:
+        description: Successful Windows cleanup candidate run for this exact source commit
+        type: string
+        required: false
+      compare_macos_package:
+        description: Compare the qualified published package against upstream on macOS
+        type: boolean
+        default: false
+      prepare_stable_package:
+        description: Prepare and test stable 1.1.1 bytes without publishing
+        type: boolean
+        default: false
+      publish_stable_package:
+        description: Publish qualified stable 1.1.1 after merge to accomplish-1.1
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
+  prepare-stable-package:
+    name: Prepare stable package without rebuilding implementation
+    if: github.event_name == 'workflow_dispatch' && (inputs.prepare_stable_package || inputs.publish_stable_package) && github.repository == 'accomplish-ai/node-pty'
+    runs-on: ubuntu-22.04
+    needs: [build-test, package-test]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Confirm reviewed implementation still matches the qualified source
+        run: |
+          git diff --exit-code de37f90181ca989315bc9cb83dbda5ccc0f5f828 HEAD -- src deps typings binding.gyp package.json package-lock.json scripts/prebuild.js scripts/post-install.js
+      - name: Download the qualified immutable archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 35889321781 --repo accomplish-ai/node-pty --name node-pty-test-package-35889321781-2 --dir stable-source
+      - name: Promote metadata while preserving every implementation byte
+        run: >-
+          python scripts/accomplish-package.py
+          --promote stable-source/accomplish-ai-node-pty-1.1.1-test.35889321781.2.gde37f901.tgz
+          --stable-version 1.1.1
+          --expected-sha256 350c598a0a4a1aec7fb39a9558411119017879acfa76f1c5a4da060e7b3abf38
+          --output test-package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-pty-stable-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-package
+          if-no-files-found: error
+          retention-days: 30
+
+  test-stable-package:
+    name: Test stable package (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: prepare-stable-package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-14]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-pty-stable-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-package
+      - name: Compile upstream test files
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Test installed stable package without publication
+        run: npm run test:package -- test-package/publication.json
+
+  publish-stable-package:
+    name: Publish reviewed stable package
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_stable_package && !inputs.publish_test_package && github.repository == 'accomplish-ai/node-pty' && github.ref == 'refs/heads/accomplish-1.1'
+    needs: test-stable-package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: https://npm.pkg.github.com
+          scope: '@accomplish-ai'
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-pty-stable-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-package
+      - name: Verify and publish exactly the tested archive
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/accomplish-package.py --verify test-package/accomplish-ai-node-pty-1.1.1.tgz --allow-stable
+          npm publish ./test-package/accomplish-ai-node-pty-1.1.1.tgz --ignore-scripts --registry https://npm.pkg.github.com --access restricted --tag latest
+          python scripts/accomplish-package.py --registry-check test-package/publication.json --allow-stable
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-pty-stable-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-package
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-package-comparison:
+    name: Compare macOS terminal cleanup (Node ${{ matrix.node }})
+    if: github.event_name == 'workflow_dispatch' && inputs.compare_macos_package
+    runs-on: macos-14
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Download the qualified immutable test archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 35889321781 --repo accomplish-ai/node-pty --name node-pty-test-package-35889321781-2 --dir comparison/archive
+      - name: Verify archive and install both packages
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          const archive = readFileSync('comparison/archive/accomplish-ai-node-pty-1.1.1-test.35889321781.2.gde37f901.tgz');
+          assert.equal(createHash('sha256').update(archive).digest('hex'), '350c598a0a4a1aec7fb39a9558411119017879acfa76f1c5a4da060e7b3abf38');
+          NODE
+          npm install --prefix comparison/baseline --no-audit --no-fund node-pty@1.1.0
+          npm install --prefix comparison/candidate --no-audit --no-fund "$PWD/comparison/archive/accomplish-ai-node-pty-1.1.1-test.35889321781.2.gde37f901.tgz"
+          # Upstream's helper is shipped without its executable mode. Runtime
+          # and Engine already repair it, so use the same baseline here.
+          chmod +x comparison/baseline/node_modules/node-pty/prebuilds/darwin-*/spawn-helper
+      - name: Compare natural exit, kill, shell cleanup, and descriptors
+        run: |
+          set -o pipefail
+          node scripts/macos-terminal-comparison.mjs comparison/baseline/node_modules/node-pty comparison/candidate/node_modules/@accomplish-ai/node-pty | tee comparison/result.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-terminal-comparison-node${{ matrix.node }}-${{ github.run_id }}
+          path: comparison/result.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
   build-test:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -30,3 +210,132 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+  package-test:
+    name: Test qualified package assembly
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/accomplish-package-test.py
+
+  assemble-test-package:
+    name: Assemble immutable test package
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_test_package && github.repository == 'accomplish-ai/node-pty' && github.ref == 'refs/heads/codex/windows-conpty-cleanup'
+    needs: [build-test, package-test]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      tag: ${{ steps.package.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: https://npm.pkg.github.com
+          scope: '@accomplish-ai'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Assemble and verify exact qualified native artifacts
+        id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+        run: python scripts/accomplish-package.py --native-run-id "$NATIVE_RUN_ID"
+      - name: Preserve assembled package for platform qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-pty-assembled-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-package/accomplish-ai-node-pty-*.tgz
+            test-package/publication.json
+          if-no-files-found: error
+          retention-days: 30
+
+  test-packaged-candidate:
+    name: Test installed package (${{ matrix.os }}, Node ${{ matrix.node }})
+    needs: assemble-test-package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-14]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-pty-assembled-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-package
+      - name: Compile upstream test files without building a replacement native addon
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Install and qualify final package bytes
+        run: npm run test:package -- test-package/publication.json
+
+  publish-test-package:
+    name: Publish immutable private test package
+    needs: [assemble-test-package, test-packaged-candidate]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: https://npm.pkg.github.com
+          scope: '@accomplish-ai'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-pty-assembled-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-package
+      - name: Verify and publish test prerelease without lifecycle scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.assemble-test-package.outputs.version }}
+          DIST_TAG: ${{ needs.assemble-test-package.outputs.tag }}
+        run: |
+          archive="./test-package/accomplish-ai-node-pty-$VERSION.tgz"
+          python scripts/accomplish-package.py --verify "$archive"
+          npm publish "$archive" --ignore-scripts --registry https://npm.pkg.github.com --access restricted --tag "$DIST_TAG"
+      - name: Verify exact registry version and downloaded archive
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: python scripts/accomplish-package.py --registry-check test-package/publication.json
+      - name: Preserve package and publication receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-pty-test-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-package/accomplish-ai-node-pty-*.tgz
+            test-package/publication.json
+            test-package/registry-verification.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -10,6 +10,21 @@ import { loadNativeModule } from './utils';
 
 const getConsoleProcessList = loadNativeModule('conpty_console_list').module.getConsoleProcessList;
 const shellPid = parseInt(process.argv[2], 10);
-const consoleProcessList = getConsoleProcessList(shellPid);
+let consoleProcessList: number[];
+try {
+  consoleProcessList = getConsoleProcessList(shellPid);
+} catch (error) {
+  // Natural exit can win the race with enumeration. Only ignore the error if
+  // the shell no longer exists; keep unexpected helper failures visible.
+  try {
+    process.kill(shellPid, 0);
+  } catch (probeError) {
+    if (probeError.code === 'ESRCH') {
+      process.send!({ consoleProcessList: [] });
+      process.exit(0);
+    }
+  }
+  throw error;
+}
 process.send!({ consoleProcessList });
 process.exit(0);

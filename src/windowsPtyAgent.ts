@@ -34,6 +34,7 @@ export class WindowsPtyAgent {
   private _innerPid: number = 0;
   private _closeTimeout: NodeJS.Timer | undefined;
   private _exitCode: number | undefined;
+  private _killRequested: boolean = false;
   private _conoutSocketWorker: ConoutConnection;
 
   private _fd: any;
@@ -141,28 +142,30 @@ export class WindowsPtyAgent {
   public kill(): void {
     // Tell the agent to kill the pty, this releases handles to the process
     if (this._useConpty) {
-      if (!this._useConptyDll) {
-        this._inSocket.readable = false;
-        this._outSocket.readable = false;
-        this._getConsoleProcessList().then(consoleProcessList => {
-          consoleProcessList.forEach((pid: number) => {
-            try {
-              process.kill(pid);
-            } catch (e) {
-              // Ignore if process cannot be found (kill ESRCH error)
-            }
-          });
-        });
-        (this._ptyNative as IConptyNative).kill(this._pty, this._useConptyDll);
-        this._conoutSocketWorker.dispose();
-      } else {
-        // Close the input write handle to signal the end of session.
+      if (this._killRequested || this._exitCode !== undefined) {
+        return;
+      }
+      this._killRequested = true;
+      if (this._useConptyDll) {
+        // Bundled ConPTY closes its attached processes with the pseudoconsole.
+        // Its shell may not accept AttachConsole until startup input arrives.
         this._inSocket.destroy();
         (this._ptyNative as IConptyNative).kill(this._pty, this._useConptyDll);
-        this._outSocket.on('data', () => {
-          this._conoutSocketWorker.dispose();
-        });
+        return;
       }
+      // Attach while the console still exists. Closing it first races the helper
+      // and can leave descendants running with a five-second fallback timer.
+      this._getConsoleProcessList().then(consoleProcessList => {
+        consoleProcessList.forEach(pid => {
+          try {
+            process.kill(pid);
+          } catch (e) {
+            // The process may have exited while the helper was enumerating it.
+          }
+        });
+        this._inSocket.destroy();
+        (this._ptyNative as IConptyNative).kill(this._pty, this._useConptyDll);
+      });
     } else {
       // Because pty.kill closes the handle, it will kill most processes by itself.
       // Process IDs can be reused as soon as all handles to them are
@@ -185,15 +188,23 @@ export class WindowsPtyAgent {
   private _getConsoleProcessList(): Promise<number[]> {
     return new Promise<number[]>(resolve => {
       const agent = fork(path.join(__dirname, 'conpty_console_list_agent'), [ this._innerPid.toString() ]);
-      agent.on('message', message => {
+      let settled = false;
+      const finish = (pids: number[]): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         clearTimeout(timeout);
-        resolve(message.consoleProcessList);
-      });
+        resolve(pids.filter(pid => pid !== agent.pid));
+      };
       const timeout = setTimeout(() => {
         // Something went wrong, just send back the shell PID
         agent.kill();
-        resolve([ this._innerPid ]);
+        finish(this._exitCode === undefined ? [ this._innerPid ] : []);
       }, 5000);
+      agent.once('message', message => finish(message.consoleProcessList));
+      agent.once('error', () => finish(this._exitCode === undefined ? [ this._innerPid ] : []));
+      agent.once('exit', () => finish(this._exitCode === undefined ? [ this._innerPid ] : []));
     });
   }
 
@@ -223,16 +234,12 @@ export class WindowsPtyAgent {
    */
   private _$onProcessExit(exitCode: number): void {
     this._exitCode = exitCode;
-    if (!this._useConptyDll) {
-      this._flushDataAndCleanUp();
-      this._outSocket.on('data', () => this._flushDataAndCleanUp());
-    }
+    this._inSocket.destroy();
+    this._flushDataAndCleanUp();
+    this._outSocket.on('data', () => this._flushDataAndCleanUp());
   }
 
   private _flushDataAndCleanUp(): void {
-    if (this._useConptyDll) {
-      return;
-    }
     if (this._closeTimeout) {
       clearTimeout(this._closeTimeout);
     }
@@ -240,12 +247,10 @@ export class WindowsPtyAgent {
   }
 
   private _cleanUpProcess(): void {
-    if (this._useConptyDll) {
-      return;
-    }
     this._inSocket.readable = false;
     this._outSocket.readable = false;
     this._outSocket.destroy();
+    this._conoutSocketWorker.dispose();
   }
 }
 

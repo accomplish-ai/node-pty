@@ -42,6 +42,7 @@
     "postinstall": "node scripts/post-install.js",
     "compileCommands": "node scripts/gen-compile-commands.js",
     "test": "cross-env NODE_ENV=test mocha -R spec --exit lib/*.test.js",
+    "test:package": "node scripts/accomplish-test-package.mjs",
     "posttest": "npm run lint",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
